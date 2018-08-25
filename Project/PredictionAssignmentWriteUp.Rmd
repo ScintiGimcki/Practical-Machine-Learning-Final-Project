@@ -1,0 +1,143 @@
+---
+title: "Project for Practical Machine Learning"
+author: "Jinxi Li"
+output: html_document
+---
+
+# Synopsis
+In this report, I will do some prediction by using data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants, and to predict the manner in which they did the exercise. Three machine learning algorithms will be trained and one of them will be selected to do the prediction: **Random Forest**, **Boosting** and **Linear Discriminant Analysis**.
+
+# Data
+The datasets of this project is from the source [data source]( http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har). Training data can be downloaded in [training data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv). Testing data can be downloaded in [testing data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+## Loading Data
+I loaded the data and cleaned them as below. Some of the should-be-numeric columns are regarded as char at first, I did a transference and omitted the time variables.
+```{r loading, echo = TRUE, message = FALSE, warning = FALSE}
+## load training set
+pml_training <- read.csv("pml-training.csv", stringsAsFactors = FALSE, na.strings = "")
+pml_training$classe <- factor(pml_training$classe)
+pml_training[,-c(1:6, 160)] <- apply(pml_training[,-c(1:6, 160)], 2, as.numeric)
+pml_training <- pml_training[,-c(1:5)]
+## load testing set
+pml_testing <- read.csv("pml-testing.csv", stringsAsFactors = FALSE, na.strings = "")
+pml_testing[,-c(1:6, 160)] <- apply(pml_testing[,-c(1:6, 160)], 2, as.numeric)
+```
+
+## Cleaning Data
+The package we need in this section and training section is [*caret*].
+```{r caret_package, echo = TRUE, message = FALSE}
+library(caret)
+```
+
+### Dealing with NAs
+First of all, I calculated the percentage of NAs for each column, and omited those with percentage larger than 0.1, which will be considered as influential.
+```{r check_nas, echo = TRUE, message = FALSE}
+check_na <- function(dataframe, benchmark){
+  naPerc <- as.vector(apply(dataframe, 2, function(x){mean(is.na(x))}))
+  which(naPerc > benchmark)
+}
+naArray <- check_na(pml_training, 0.1)
+lowNaTrain <- pml_training[,-naArray]
+numberNas <- which(as.vector(apply(lowNaTrain, 2, function(x){mean(is.na(x))}))>0)
+```
+After doing so, I find out that all the columns left including no NAs, as the the number of columns with percentage of NAs larger than 0 is `r numberNas`.
+
+### Dealing with Correlations
+Secondly, I selected all the numeric columns out and calculated their correlations, finding out that some of them are as high as 0.8.
+```{r check_cor,echo = TRUE, message = FALSE}
+check_num <- function(dataframe){
+  classArray <- rep("", dim(dataframe)[2])
+  for (i in 1:length(names(dataframe))) {
+    classArray[i] <- class(dataframe[[names(dataframe)[i]]])
+  }
+  which(classArray == "numeric")
+}
+numVar <- check_num(lowNaTrain)
+corM <- abs(cor(lowNaTrain[, numVar]))
+diag(corM) <- 0
+largeCor <- as.data.frame(which(corM > 0.8, arr.ind = T))
+largeCorIndex <- unique(largeCor$row)
+```
+
+After being scaled, the high correlated columns were applied with PCA and with 90% variance remained.
+```{r preProc, echo = TRUE, message = FALSE}
+numTrain <- lowNaTrain[, numVar]
+## scaling
+scaleProc <- preProcess(numTrain, method = c("center", "scale"))
+numTrain <- predict(scaleProc, numTrain)
+## PCA
+pcaProc <- preProcess(numTrain[,largeCorIndex], method = c("pca"), thresh = 0.9)
+pcaVar <- predict(pcaProc, numTrain[, largeCorIndex])
+```
+
+# Training Model
+## Training, Validation & Testing
+I combined the pca variables and those variables needed, and choosed 70% of them randomly to constitute training set and 30% of them for cross validation.
+```{r constructing, echo = TRUE}
+pcaTrain <- cbind(pml_training$classe, pcaVar, numTrain[, -largeCorIndex], 
+                  lowNaTrain[, -numVar])
+names(pcaTrain)[1] <- "classe"
+inTrain <- createDataPartition(pml_training$classe, p=0.7, list = FALSE)
+training <- pcaTrain[inTrain,]
+validation <- pcaTrain[-inTrain,]
+scaleTesting <- predict(scaleProc, pml_testing)
+testing <- predict(pcaProc, scaleTesting)
+```
+
+## Training Models
+Considering of the high time comsumption of training models, I used [*parallel*] and [*doParallel*] to boost my calculating efficiency.
+```{r setParallel, echo = TRUE, message = FALSE}
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) 
+registerDoParallel(cluster)
+```
+
+```{r rf, echo = TRUE, message = FALSE, cache = TRUE}
+fitcontrol <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+## random forest
+modelRF <- train(classe~., data = training, method = "rf", trControl = fitcontrol)
+```
+
+```{r boosting, echo = TRUE, message = FALSE, cache = TRUE}
+## Boosting
+modelGBM <- train(classe~., data = training, method = "gbm")
+```
+
+```{r LDA, echo = TRUE, message = FALSE, cache = TRUE}
+## linear discriminant analysis
+modelLDA <- train (classe~., data = training, method = "lda")
+```
+
+```{r stopCluster, echo = TRUE, cache = FALSE}
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+## Accuracy
+After training with training sets, I used validation set to calculate the predicting accuracy, based on which the best model would be selected. 
+```{r accuracy, echo = TRUE, cache = TRUE, message = FALSE, results = "asis"}
+predictionRF <- mean(predict(modelRF, validation) == validation$classe)
+predictionGBM <- mean(predict(modelGBM, validation) == validation$classe)
+predictionLDA <- mean(predict(modelLDA, validation) == validation$classe)
+accuM <- data.frame(rbind(predictionRF, predictionGBM, predictionLDA))
+colnames(accuM) <- "Accuracy"
+library(xtable)
+accuM <- xtable(accuM)
+print(accuM, type = "html")
+```
+From the table above, we can see that the best model is **Random Forest** and the accuracy of it is nearly 1, which meets the [Required Model Accuracy](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-requiredModelAccuracy.md)
+
+##Predict
+Finally, I used the **Random Forest** model to take the prediction, and get the result turning out to be all correct. (The result won't be listed here.) 
+```{r predict, echo = TRUE}
+results <- predict(modelRF, testing)
+```
+
+
+
+
+
+
+
+
